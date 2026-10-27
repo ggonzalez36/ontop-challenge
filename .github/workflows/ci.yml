@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and test (H2, embedded Kafka, PostgreSQL via Testcontainers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build and run all tests
+        run: ./gradlew build --no-daemon
+
+      - name: Fail if the PostgreSQL tests were skipped
+        run: |
+          report=build/test-results/test/TEST-com.ontop.transfers.adapter.out.persistence.PostgresPersistenceIT.xml
+          grep -q 'skipped="0"' "$report" || { echo "PostgresPersistenceIT was skipped: Docker not available"; exit 1; }
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: build/reports/tests/test
+          retention-days: 7
+
+  docker:
+    name: Docker image
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ontop-transfers:${{ github.sha }} .

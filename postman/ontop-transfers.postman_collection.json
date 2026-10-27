@@ -1,162 +1,240 @@
 {
   "info": {
     "name": "Ontop Transfers",
-    "description": "Execute transfer endpoint of the Ontop challenge. Start the service with `./gradlew bootRun` (http://localhost:8080). The seeded recipient belongs to user 1000.",
+    "description": "Ontop challenge API. Start the service with `./gradlew bootRun` (http://localhost:8080). `devToken` is a JWT for user 1000 signed with the DEVELOPMENT secret (valid until 2036); in production tokens come from the identity provider. Demo recipients for user 1000 are loaded at startup.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [ { "key": "token", "value": "{{devToken}}", "type": "string" } ]
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8080" },
-    { "key": "userId", "value": "1000" },
+    { "key": "devToken", "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMDAwIiwiaWF0IjoxNzkzMDg4MDAwLCJleHAiOjIxMDg3MDcyMDB9.CDO2-YKJb9FCAXw9rA8ZEwwMthYbYSIcEAfd2aeteOM" },
     { "key": "recipientId", "value": "6f1c2b8e-3a4d-4e5f-9a6b-7c8d9e0f1a2b" },
     { "key": "replayKey", "value": "postman-replay-0001" },
-    { "key": "transferId", "value": "" }
+    { "key": "transferId", "value": "" },
+    { "key": "newRecipientId", "value": "" }
   ],
   "item": [
     {
-      "name": "Execute transfer (201 PROCESSING)",
-      "event": [
+      "name": "Recipients",
+      "item": [
         {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('201 Created', () => pm.response.to.have.status(201));",
-              "const body = pm.response.json();",
-              "pm.test('fee is 10% and deducted from amount', () => {",
-              "  pm.expect(body.fee).to.eql(2.0);",
-              "  pm.expect(body.netAmount).to.eql(18.0);",
-              "});",
-              "pm.collectionVariables.set('transferId', body.id);"
-            ]
-          }
-        }
-      ],
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-User-Id", "value": "{{userId}}" },
-          { "key": "Idempotency-Key", "value": "{{$guid}}" }
-        ],
-        "url": "{{baseUrl}}/v1/transfers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
-        }
-      },
-      "response": [
-        {
-          "name": "201 Created",
-          "originalRequest": {
+          "name": "Save recipient (201)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "pm.test('no sensitive data in the response', () => pm.expect(pm.response.json()).to.not.have.property('accountNumber'));",
+                  "pm.collectionVariables.set('newRecipientId', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
             "method": "POST",
-            "header": [
-              { "key": "X-User-Id", "value": "1000" },
-              { "key": "Idempotency-Key", "value": "7f9c2a0e-1c55-4f7b-9a63-3f0d6b2d1e10" }
-            ],
-            "url": "{{baseUrl}}/v1/transfers",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/v1/recipients",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"recipientId\": \"6f1c2b8e-3a4d-4e5f-9a6b-7c8d9e0f1a2b\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+              "raw": "{\n  \"firstName\": \"Lucho\",\n  \"lastName\": \"Rodriguez\",\n  \"nationalId\": \"3327809\",\n  \"routingNumber\": \"623852453\",\n  \"accountNumber\": \"2300299907\",\n  \"bankName\": \"Chase\"\n}"
             }
-          },
-          "status": "Created",
-          "code": 201,
-          "_postman_previewlanguage": "json",
-          "header": [
-            { "key": "Content-Type", "value": "application/json" },
-            { "key": "Location", "value": "http://localhost:8080/v1/transfers/5d1e8a3c-2f4b-4c6d-9e8f-0a1b2c3d4e5f" }
-          ],
-          "body": "{\n  \"id\": \"5d1e8a3c-2f4b-4c6d-9e8f-0a1b2c3d4e5f\",\n  \"status\": \"PROCESSING\",\n  \"amount\": 20.00,\n  \"fee\": 2.00,\n  \"netAmount\": 18.00,\n  \"currency\": \"USD\",\n  \"recipient\": {\n    \"name\": \"Lucho Rodriguez\",\n    \"bankName\": \"Bank of America\",\n    \"accountLast4\": \"6711\"\n  },\n  \"createdAt\": \"2026-10-27T15:04:05Z\"\n}"
+          }
+        },
+        {
+          "name": "List recipients",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/recipients" }
+        },
+        {
+          "name": "Delete recipient (204)",
+          "request": { "method": "DELETE", "url": "{{baseUrl}}/v1/recipients/{{newRecipientId}}" }
         }
       ]
     },
     {
-      "name": "Get transfer",
-      "request": {
-        "method": "GET",
-        "header": [ { "key": "X-User-Id", "value": "{{userId}}" } ],
-        "url": "{{baseUrl}}/v1/transfers/{{transferId}}"
-      }
+      "name": "Transfers",
+      "item": [
+        {
+          "name": "Quote (fee and net amount)",
+          "request": {
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/v1/transfers/quotes",
+            "body": { "mode": "raw", "raw": "{\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}" }
+          }
+        },
+        {
+          "name": "Execute transfer (201 PROCESSING)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('fee is 10% and deducted from amount', () => {",
+                  "  pm.expect(body.fee).to.eql(2.0);",
+                  "  pm.expect(body.netAmount).to.eql(18.0);",
+                  "});",
+                  "pm.collectionVariables.set('transferId', body.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "url": "{{baseUrl}}/v1/transfers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [ { "key": "Idempotency-Key", "value": "7f9c2a0e-1c55-4f7b-9a63-3f0d6b2d1e10" } ],
+                "url": "{{baseUrl}}/v1/transfers",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"recipientId\": \"6f1c2b8e-3a4d-4e5f-9a6b-7c8d9e0f1a2b\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                { "key": "Content-Type", "value": "application/json" },
+                { "key": "Location", "value": "http://localhost:8080/v1/transfers/5d1e8a3c-2f4b-4c6d-9e8f-0a1b2c3d4e5f" }
+              ],
+              "body": "{\n  \"id\": \"5d1e8a3c-2f4b-4c6d-9e8f-0a1b2c3d4e5f\",\n  \"status\": \"PROCESSING\",\n  \"amount\": 20.00,\n  \"fee\": 2.00,\n  \"netAmount\": 18.00,\n  \"currency\": \"USD\",\n  \"recipient\": {\n    \"name\": \"Lucho Rodriguez\",\n    \"bankName\": \"Bank of America\",\n    \"accountLast4\": \"6711\"\n  },\n  \"createdAt\": \"2026-10-27T15:04:05Z\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get transfer",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/transfers/{{transferId}}" }
+        },
+        {
+          "name": "Idempotent replay (run twice: 201 then 200)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{replayKey}}" }
+            ],
+            "url": "{{baseUrl}}/v1/transfers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Same key, different amount (409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{replayKey}}" }
+            ],
+            "url": "{{baseUrl}}/v1/transfers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 35.00,\n  \"currency\": \"USD\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Insufficient funds (422)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "url": "{{baseUrl}}/v1/transfers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 99999999.00,\n  \"currency\": \"USD\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Validation error (400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "url": "{{baseUrl}}/v1/transfers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.001,\n  \"currency\": \"usd\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Without token (401)",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{baseUrl}}/v1/recipients"
+          }
+        }
+      ]
     },
     {
-      "name": "Idempotent replay (run twice: 201 then 200)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-User-Id", "value": "{{userId}}" },
-          { "key": "Idempotency-Key", "value": "{{replayKey}}" }
-        ],
-        "url": "{{baseUrl}}/v1/transfers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+      "name": "History",
+      "item": [
+        {
+          "name": "Recent transactions (first page)",
+          "request": { "method": "GET", "url": "{{baseUrl}}/v1/transactions?limit=20" }
         }
-      }
+      ]
     },
     {
-      "name": "Same key, different amount (409)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-User-Id", "value": "{{userId}}" },
-          { "key": "Idempotency-Key", "value": "{{replayKey}}" }
-        ],
-        "url": "{{baseUrl}}/v1/transfers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 35.00,\n  \"currency\": \"USD\"\n}"
+      "name": "Provider callback",
+      "item": [
+        {
+          "name": "Payment completed (signed, 204)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// HMAC-SHA256 of the raw body with the DEV webhook secret, as the provider would sign it",
+                  "const body = pm.request.body.raw.replace('{{transferId}}', pm.collectionVariables.get('transferId'));",
+                  "const signature = CryptoJS.HmacSHA256(body, 'dev-only-payments-webhook-secret').toString(CryptoJS.enc.Hex);",
+                  "pm.request.headers.upsert({ key: 'X-Signature', value: 'sha256=' + signature });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [ { "key": "Content-Type", "value": "application/json" } ],
+            "url": "{{baseUrl}}/internal/v1/payment-events",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"reference\": \"{{transferId}}\", \"paymentId\": \"70cfe468-91b9-4e04-8910-5e8257dfadfa\", \"status\": \"COMPLETED\"}"
+            }
+          }
         }
-      }
-    },
-    {
-      "name": "Insufficient funds (422)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-User-Id", "value": "{{userId}}" },
-          { "key": "Idempotency-Key", "value": "{{$guid}}" }
-        ],
-        "url": "{{baseUrl}}/v1/transfers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 99999999.00,\n  \"currency\": \"USD\"\n}"
-        }
-      }
-    },
-    {
-      "name": "Recipient of another user (404)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-User-Id", "value": "2000" },
-          { "key": "Idempotency-Key", "value": "{{$guid}}" }
-        ],
-        "url": "{{baseUrl}}/v1/transfers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
-        }
-      }
-    },
-    {
-      "name": "Validation error (400)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "X-User-Id", "value": "{{userId}}" },
-          { "key": "Idempotency-Key", "value": "{{$guid}}" }
-        ],
-        "url": "{{baseUrl}}/v1/transfers",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.001,\n  \"currency\": \"usd\"\n}"
-        }
-      }
+      ]
     }
   ]
 }
