@@ -19,6 +19,8 @@ tasks.withType(JavaCompile).configureEach {
 ext {
     resilience4jVersion = '2.2.0'
     shedlockVersion = '5.16.0'
+    // 1.21.3 (Boot's default) speaks a Docker API version that Docker Engine 29+ rejects
+    set('testcontainers.version', '1.21.4')
 }
 
 dependencies {

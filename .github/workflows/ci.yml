@@ -27,6 +27,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      - name: Docker available for Testcontainers
+        run: docker version --format 'client API {{.Client.APIVersion}}, server API {{.Server.APIVersion}} (min {{.Server.MinAPIVersion}})'
+
       - name: Build and run all tests
         run: ./gradlew build --no-daemon
 
