@@ -10,7 +10,7 @@ A 10% fee applies when the transfer executes, and "how to apply it" is our choic
 
 - **Fee is deducted from the amount sent**: wallet is debited `amount`, provider pays `netAmount = amount − fee`, Ontop keeps `fee`. This matches the screen and means the user never needs more balance than what they typed.
 - `fee = amount × rate`, rounded to 2 decimals with `RoundingMode.HALF_EVEN`; `netAmount = amount − fee` (computed by subtraction, not by multiplying by 0.9, so `amount = fee + netAmount` always holds to the cent).
-- `FeePolicy` is a domain interface; `PercentageFeePolicy(rate)` is the first implementation, with `rate` from configuration (`ontop.fees.withdrawal-rate=0.10`). The rate applied is **stored on the transfer**, so history is correct after the rule changes.
+- `FeePolicy` is a domain interface; `PercentageFeePolicy(rate)` is the first implementation, with `rate` from configuration (`ontop.fees.withdrawal-rate=0.10`). The fee amount is **stored on each transfer**, so history stays correct after the rule changes.
 - `Money` value object over `BigDecimal` with currency; `double` is never used for amounts. Validation: amount > 0, scale ≤ 2, `netAmount > 0` (so tiny amounts like 0.01 are rejected), configurable min/max.
 - The same `FeePolicy` powers `POST /v1/transfers/quotes`, so the screen and the execution can never disagree.
 

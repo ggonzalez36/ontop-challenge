@@ -392,18 +392,22 @@ erDiagram
         uuid id PK
         bigint user_id
         uuid recipient_id FK
+        varchar recipient_name
+        varchar recipient_routing_number
+        varchar recipient_account_number
+        varchar recipient_bank_name
         varchar idempotency_key
-        varchar request_hash
+        varchar request_fingerprint
         numeric amount
         numeric fee
         numeric net_amount
-        char currency
+        varchar currency
         varchar status
+        bigint in_flight_user_id
         varchar wallet_debit_id
         varchar wallet_refund_id
         varchar provider_payment_id
         varchar failure_reason
-        jsonb recipient_snapshot
         bigint version
         timestamptz created_at
         timestamptz updated_at
@@ -439,7 +443,8 @@ erDiagram
 ```
 
 - `UNIQUE (user_id, idempotency_key)` on `transfer`.
-- Partial unique index `ON transfer (user_id) WHERE status IN ('CREATED','WALLET_DEBITED')` → at most one transfer per user in the debit phase (see [ADR 004](adr/004-idempotency-and-concurrency.md)).
+- `UNIQUE (in_flight_user_id)`, a column equal to `user_id` only while the status is `CREATED` or `WALLET_DEBITED` → at most one transfer per user in the debit phase (see [ADR 004](adr/004-idempotency-and-concurrency.md)).
+- `CHECK (amount = fee + net_amount)` so the money invariant also holds at the storage level.
 - `version` column for optimistic locking (`@Version`), so two writers (request thread and recovery job) cannot overwrite each other.
 - `national_id` and `account_number` encrypted at the application layer (AES-GCM, key from KMS / Vault); only `account_last4` is returned by the API.
 - `ledger_entry` is append-only; see [ADR 005](adr/005-ledger-and-reconciliation.md).
@@ -532,7 +537,7 @@ Provider errors are **not** HTTP errors for the client: they change the transfer
 | `PaymentProviderPort` | `POST /api/v1/payments` | `{ source: { type: COMPANY, sourceInformation: { name }, account: { accountNumber, currency, routingNumber } }, destination: { name, account: {...} }, amount }` | 200 `{ requestInfo: { status }, paymentInfo: { id, amount } }`, 400, 500 (failure), 500 (timeout) |
 
 - Ontop's source account (name, account number, routing number, currency) is **configuration** (`ontop.payments.source.*`), never request input.
-- Each adapter has its own timeouts (connect 2 s, read 5 s for wallet, 10 s for provider), a Resilience4j circuit breaker, and retries **only on idempotent calls** (balance GET). The wallet withdrawal and the payment POST are never retried blindly, because the mocks give no idempotency guarantee.
+- Each adapter has its own timeouts (connect 2 s, read 5 s for wallet, 10 s for provider). Designed, not coded: a Resilience4j circuit breaker per adapter and retries **only on idempotent calls** (balance GET). The wallet withdrawal and the payment POST are never retried blindly, because the mocks give no idempotency guarantee.
 
 ## 13. Cross-cutting concerns
 

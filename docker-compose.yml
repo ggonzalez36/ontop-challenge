@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: transfers
+      POSTGRES_USER: transfers
+      POSTGRES_PASSWORD: transfers
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transfers"]
+      interval: 5s
+      retries: 10
+
+  transfers:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: postgres
+      DB_URL: jdbc:postgresql://postgres:5432/transfers
+      WALLET_BASE_URL: ${WALLET_BASE_URL:-http://mockoon.tools.getontop.com:3000}
+      PAYMENTS_BASE_URL: ${PAYMENTS_BASE_URL:-http://mockoon.tools.getontop.com:3000}
+    ports:
+      - "127.0.0.1:8080:8080"

@@ -19,7 +19,7 @@ I treat the fee as a product hypothesis with a business owner, not as a constant
 
 1. **Agree on the goal and the guardrails before the number.** With Finance and Product: what revenue per transfer do we need, and which metrics must not get worse (conversion on the "send" screen, withdrawal frequency, churn, support tickets about fees). With Legal/Compliance: disclosure rules per country and refund obligations.
 2. **Bring data, not opinions.** Cost per transfer from the provider, competitors' pricing, and how our users' transfer amounts are distributed. A flat 10% hurts large withdrawals the most, which are often our best users. Options to show: percentage with a cap, a flat fee, tiers, free first withdrawal per month.
-3. **Make the system cheap to change.** `FeePolicy` behind a port, the rate in configuration, the applied rate stored on each transfer, and a quote endpoint so the user always sees fee and net amount before confirming. That is the most important UX decision: no surprises.
+3. **Make the system cheap to change.** `FeePolicy` behind a port, the rate in configuration, the fee stored on each transfer, and a quote endpoint so the user always sees fee and net amount before confirming. That is the most important UX decision: no surprises.
 4. **Validate with an experiment.** Feature-flagged cohorts (e.g. 10% vs 10% capped at 15 USD), a pre-agreed decision date and success metric, and a dashboard shared with every stakeholder.
 5. **Close the loop.** Decide in a short review with the owners, record the decision and its reasons (an ADR-style one-pager), and keep watching support tickets and conversion after rollout.
 

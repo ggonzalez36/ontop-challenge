@@ -1,0 +1,162 @@
+{
+  "info": {
+    "name": "Ontop Transfers",
+    "description": "Execute transfer endpoint of the Ontop challenge. Start the service with `./gradlew bootRun` (http://localhost:8080). The seeded recipient belongs to user 1000.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "userId", "value": "1000" },
+    { "key": "recipientId", "value": "6f1c2b8e-3a4d-4e5f-9a6b-7c8d9e0f1a2b" },
+    { "key": "replayKey", "value": "postman-replay-0001" },
+    { "key": "transferId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Execute transfer (201 PROCESSING)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "const body = pm.response.json();",
+              "pm.test('fee is 10% and deducted from amount', () => {",
+              "  pm.expect(body.fee).to.eql(2.0);",
+              "  pm.expect(body.netAmount).to.eql(18.0);",
+              "});",
+              "pm.collectionVariables.set('transferId', body.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-User-Id", "value": "{{userId}}" },
+          { "key": "Idempotency-Key", "value": "{{$guid}}" }
+        ],
+        "url": "{{baseUrl}}/v1/transfers",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+        }
+      },
+      "response": [
+        {
+          "name": "201 Created",
+          "originalRequest": {
+            "method": "POST",
+            "header": [
+              { "key": "X-User-Id", "value": "1000" },
+              { "key": "Idempotency-Key", "value": "7f9c2a0e-1c55-4f7b-9a63-3f0d6b2d1e10" }
+            ],
+            "url": "{{baseUrl}}/v1/transfers",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientId\": \"6f1c2b8e-3a4d-4e5f-9a6b-7c8d9e0f1a2b\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+            }
+          },
+          "status": "Created",
+          "code": 201,
+          "_postman_previewlanguage": "json",
+          "header": [
+            { "key": "Content-Type", "value": "application/json" },
+            { "key": "Location", "value": "http://localhost:8080/v1/transfers/5d1e8a3c-2f4b-4c6d-9e8f-0a1b2c3d4e5f" }
+          ],
+          "body": "{\n  \"id\": \"5d1e8a3c-2f4b-4c6d-9e8f-0a1b2c3d4e5f\",\n  \"status\": \"PROCESSING\",\n  \"amount\": 20.00,\n  \"fee\": 2.00,\n  \"netAmount\": 18.00,\n  \"currency\": \"USD\",\n  \"recipient\": {\n    \"name\": \"Lucho Rodriguez\",\n    \"bankName\": \"Bank of America\",\n    \"accountLast4\": \"6711\"\n  },\n  \"createdAt\": \"2026-10-27T15:04:05Z\"\n}"
+        }
+      ]
+    },
+    {
+      "name": "Get transfer",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "X-User-Id", "value": "{{userId}}" } ],
+        "url": "{{baseUrl}}/v1/transfers/{{transferId}}"
+      }
+    },
+    {
+      "name": "Idempotent replay (run twice: 201 then 200)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-User-Id", "value": "{{userId}}" },
+          { "key": "Idempotency-Key", "value": "{{replayKey}}" }
+        ],
+        "url": "{{baseUrl}}/v1/transfers",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Same key, different amount (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-User-Id", "value": "{{userId}}" },
+          { "key": "Idempotency-Key", "value": "{{replayKey}}" }
+        ],
+        "url": "{{baseUrl}}/v1/transfers",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 35.00,\n  \"currency\": \"USD\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Insufficient funds (422)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-User-Id", "value": "{{userId}}" },
+          { "key": "Idempotency-Key", "value": "{{$guid}}" }
+        ],
+        "url": "{{baseUrl}}/v1/transfers",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 99999999.00,\n  \"currency\": \"USD\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Recipient of another user (404)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-User-Id", "value": "2000" },
+          { "key": "Idempotency-Key", "value": "{{$guid}}" }
+        ],
+        "url": "{{baseUrl}}/v1/transfers",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.00,\n  \"currency\": \"USD\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Validation error (400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "X-User-Id", "value": "{{userId}}" },
+          { "key": "Idempotency-Key", "value": "{{$guid}}" }
+        ],
+        "url": "{{baseUrl}}/v1/transfers",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"recipientId\": \"{{recipientId}}\",\n  \"amount\": 20.001,\n  \"currency\": \"usd\"\n}"
+        }
+      }
+    }
+  ]
+}

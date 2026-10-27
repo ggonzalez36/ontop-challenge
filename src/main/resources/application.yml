@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: ontop-transfers
+  datasource:
+    url: jdbc:h2:mem:transfers;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed
+
+server:
+  # Loopback by default for local runs; the container overrides it with 0.0.0.0.
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+ontop:
+  fees:
+    withdrawal-rate: 0.10
+  wallet:
+    base-url: ${WALLET_BASE_URL:http://mockoon.tools.getontop.com:3000}
+    connect-timeout: 2s
+    read-timeout: 5s
+    currency: USD
+  payments:
+    base-url: ${PAYMENTS_BASE_URL:http://mockoon.tools.getontop.com:3000}
+    connect-timeout: 2s
+    read-timeout: 10s
+    source:
+      name: ${ONTOP_ACCOUNT_NAME:ONTOP INC}
+      account-number: ${ONTOP_ACCOUNT_NUMBER:0245253419}
+      routing-number: ${ONTOP_ROUTING_NUMBER:028444018}
+      currency: USD

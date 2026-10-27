@@ -18,8 +18,8 @@ Two risks move real money twice:
 - The insert of the `CREATED` row is the lock: a concurrent duplicate fails on the unique constraint and is answered with the winner's transfer.
 
 **Concurrency per user**
-- Partial unique index `ON transfer (user_id) WHERE status IN ('CREATED','WALLET_DEBITED')`: a second transfer for the same user is rejected with 409 `transfer-in-progress` while the first is between "decided" and "debited". After the debit, the wallet itself reflects the lower balance, so later checks are correct.
-- This works across many instances because PostgreSQL enforces it, unlike a JVM lock.
+- Column `in_flight_user_id` = `user_id` while the transfer is `CREATED` or `WALLET_DEBITED`, `NULL` otherwise, with a `UNIQUE` constraint (NULLs do not collide). A second transfer for the same user is rejected with 409 `transfer-in-progress` while the first is between "decided" and "debited". After the debit, the wallet itself reflects the lower balance, so later checks are correct.
+- This works across many instances because the database enforces it, unlike a JVM lock. In PostgreSQL alone a partial unique index (`ON transfer (user_id) WHERE status IN (...)`) would do the same; the column version was chosen because it behaves identically in H2, so the tests exercise the real constraint.
 - `@Version` optimistic locking on `transfer` so the request thread and the recovery job never overwrite each other's status.
 
 ## Alternatives considered
