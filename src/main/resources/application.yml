@@ -9,8 +9,12 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
-  flyway:
-    locations: classpath:db/migration,classpath:db/seed
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
 
 server:
   # Loopback by default for local runs; the container overrides it with 0.0.0.0.
@@ -21,7 +25,25 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        # 4xx are business answers, not a sign that the service is down
+        ignore-exceptions:
+          - org.springframework.web.client.HttpClientErrorException
+    instances:
+      wallet:
+        base-config: default
+      payments:
+        base-config: default
 
 ontop:
   fees:
@@ -35,8 +57,36 @@ ontop:
     base-url: ${PAYMENTS_BASE_URL:http://mockoon.tools.getontop.com:3000}
     connect-timeout: 2s
     read-timeout: 10s
+    lookup-enabled: ${PAYMENTS_LOOKUP_ENABLED:false}
     source:
       name: ${ONTOP_ACCOUNT_NAME:ONTOP INC}
       account-number: ${ONTOP_ACCOUNT_NUMBER:0245253419}
       routing-number: ${ONTOP_ROUTING_NUMBER:028444018}
       currency: USD
+  security:
+    jwt:
+      issuer-uri: ${JWT_ISSUER_URI:}
+      # DEV ONLY. Production uses issuer-uri; never ship this secret.
+      hmac-secret: ${JWT_HMAC_SECRET:b250b3AtY2hhbGxlbmdlLWRldi1vbmx5LWp3dC1zaWduaW5nLWtleS0wMDAx}
+  crypto:
+    # DEV ONLY. 32 bytes, base64. Production reads it from KMS / Vault.
+    pii-key: ${PII_ENCRYPTION_KEY:3Kjf0BNJ7Bja4tefKaLriYqk7MAxFfSJBz18QzZZeC0=}
+  webhooks:
+    # DEV ONLY. Shared with the payments provider to sign callbacks.
+    payments-secret: ${PAYMENTS_WEBHOOK_SECRET:dev-only-payments-webhook-secret}
+  jobs:
+    enabled: ${JOBS_ENABLED:true}
+  recovery:
+    interval: PT1M
+    stuck-after: PT15M
+    batch-size: 100
+    open-too-long: PT24H
+  reconciliation:
+    cron: "0 0 3 * * *"
+  outbox:
+    relay:
+      enabled: ${OUTBOX_RELAY_ENABLED:false}
+      topic: transfers.events
+      interval: PT2S
+  demo-data:
+    enabled: ${DEMO_DATA_ENABLED:true}

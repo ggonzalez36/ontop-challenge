@@ -1,5 +1,6 @@
 package com.ontop.transfers.domain.model;
 
+import com.ontop.transfers.domain.event.TransferEvent;
 import com.ontop.transfers.domain.exception.IllegalTransferTransitionException;
 import com.ontop.transfers.domain.exception.InsufficientFundsException;
 import com.ontop.transfers.domain.exception.InvalidAmountException;
@@ -112,10 +113,45 @@ class TransferTest {
     void cannotRefundATransferInReview() {
         Transfer transfer = newTransfer("20.00");
         transfer.markWalletDebited("w-1");
-        transfer.markOutcomeUnknown("provider timeout");
+        transfer.markOutcomeUnknown(ReviewReason.PAYMENT_UNKNOWN, "provider timeout");
 
         assertThatThrownBy(() -> transfer.markRefunded("w-2"))
                 .isInstanceOf(IllegalTransferTransitionException.class);
+    }
+
+    @Test
+    void recordsOneEventPerChangeAndHandsThemOutOnce() {
+        Transfer transfer = newTransfer("20.00");
+        transfer.markWalletDebited("w-1");
+        transfer.markPaymentSubmitted("p-1");
+
+        assertThat(transfer.pullEvents()).extracting(TransferEvent::type)
+                .containsExactly("TransferCreated", "WalletDebited", "PaymentSubmitted");
+        assertThat(transfer.pullEvents()).isEmpty();
+    }
+
+    @Test
+    void reviewReasonIsSetInReviewAndClearedWhenResolved() {
+        Transfer transfer = newTransfer("20.00");
+        transfer.markWalletDebited("w-1");
+        transfer.markOutcomeUnknown(ReviewReason.PAYMENT_UNKNOWN, "timeout");
+        assertThat(transfer.reviewReason()).isEqualTo(ReviewReason.PAYMENT_UNKNOWN);
+
+        transfer.markPaymentSubmitted("p-1");
+
+        assertThat(transfer.status()).isEqualTo(TransferStatus.PROCESSING);
+        assertThat(transfer.reviewReason()).isNull();
+    }
+
+    @Test
+    void ambiguousRefundGoesToReview() {
+        Transfer transfer = newTransfer("20.00");
+        transfer.markWalletDebited("w-1");
+        transfer.markPaymentFailed("bank rejected");
+
+        transfer.markOutcomeUnknown(ReviewReason.REFUND_UNKNOWN, "timeout");
+
+        assertThat(transfer.status()).isEqualTo(TransferStatus.IN_REVIEW);
     }
 
     @Test

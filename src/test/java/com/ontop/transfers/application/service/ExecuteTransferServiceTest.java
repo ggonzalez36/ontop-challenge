@@ -16,6 +16,7 @@ import com.ontop.transfers.application.port.out.WalletOperationResult;
 import com.ontop.transfers.application.port.out.WalletTransactionPort;
 import com.ontop.transfers.domain.exception.InsufficientFundsException;
 import com.ontop.transfers.domain.model.IdempotencyKey;
+import com.ontop.transfers.domain.model.ReviewReason;
 import com.ontop.transfers.domain.model.Transfer;
 import com.ontop.transfers.domain.model.TransferStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,7 +67,7 @@ class ExecuteTransferServiceTest {
     @BeforeEach
     void setUp() {
         service = new ExecuteTransferService(recipients, transfers, walletBalance, walletTransactions, payments,
-                TEN_PERCENT, Clock.fixed(NOW, ZoneOffset.UTC));
+                new PaymentOutcomeHandler(transfers, walletTransactions), TEN_PERCENT, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     private void givenValidRequest() {
@@ -77,11 +78,15 @@ class ExecuteTransferServiceTest {
         when(transfers.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
     }
 
-    @Test
-    void happyPathDebitsWalletAndSubmitsNetAmountToProvider() {
+    private void givenWalletDebitedAndProviderAnswers(PaymentResult result) {
         givenValidRequest();
         when(walletTransactions.withdraw(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Succeeded("59974"));
-        when(payments.pay(any())).thenReturn(new PaymentResult.Accepted("pay-1", "Processing"));
+        when(payments.pay(any())).thenReturn(result);
+    }
+
+    @Test
+    void happyPathDebitsWalletAndSubmitsNetAmountToProvider() {
+        givenWalletDebitedAndProviderAnswers(new PaymentResult.Accepted("pay-1", "Processing"));
 
         TransferOutcome outcome = service.execute(command);
 
@@ -100,9 +105,7 @@ class ExecuteTransferServiceTest {
 
     @Test
     void providerRejectionRefundsTheFullAmountIncludingFee() {
-        givenValidRequest();
-        when(walletTransactions.withdraw(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Succeeded("59974"));
-        when(payments.pay(any())).thenReturn(new PaymentResult.Rejected("bank rejected payment"));
+        givenWalletDebitedAndProviderAnswers(new PaymentResult.Rejected("bank rejected payment"));
         when(walletTransactions.topUp(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Succeeded("59975"));
 
         Transfer transfer = service.execute(command).transfer();
@@ -113,11 +116,9 @@ class ExecuteTransferServiceTest {
     }
 
     @Test
-    void failedRefundLeavesTransferInPaymentFailedForRecovery() {
-        givenValidRequest();
-        when(walletTransactions.withdraw(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Succeeded("59974"));
-        when(payments.pay(any())).thenReturn(new PaymentResult.Rejected("bank rejected payment"));
-        when(walletTransactions.topUp(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Unknown("timeout"));
+    void rejectedRefundLeavesTransferInPaymentFailedForRetry() {
+        givenWalletDebitedAndProviderAnswers(new PaymentResult.Rejected("bank rejected payment"));
+        when(walletTransactions.topUp(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Rejected("HTTP 400"));
 
         Transfer transfer = service.execute(command).transfer();
 
@@ -126,14 +127,24 @@ class ExecuteTransferServiceTest {
     }
 
     @Test
-    void providerTimeoutGoesToReviewAndIsNeverRefunded() {
-        givenValidRequest();
-        when(walletTransactions.withdraw(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Succeeded("59974"));
-        when(payments.pay(any())).thenReturn(new PaymentResult.Unknown("Read timed out"));
+    void ambiguousRefundGoesToReviewInsteadOfRetrying() {
+        givenWalletDebitedAndProviderAnswers(new PaymentResult.Rejected("bank rejected payment"));
+        when(walletTransactions.topUp(USER_ID, usd("20.00"))).thenReturn(new WalletOperationResult.Unknown("timeout"));
 
         Transfer transfer = service.execute(command).transfer();
 
         assertThat(transfer.status()).isEqualTo(TransferStatus.IN_REVIEW);
+        assertThat(transfer.reviewReason()).isEqualTo(ReviewReason.REFUND_UNKNOWN);
+    }
+
+    @Test
+    void providerTimeoutGoesToReviewAndIsNeverRefunded() {
+        givenWalletDebitedAndProviderAnswers(new PaymentResult.Unknown("Read timed out"));
+
+        Transfer transfer = service.execute(command).transfer();
+
+        assertThat(transfer.status()).isEqualTo(TransferStatus.IN_REVIEW);
+        assertThat(transfer.reviewReason()).isEqualTo(ReviewReason.PAYMENT_UNKNOWN);
         verify(walletTransactions, never()).topUp(anyLong(), any());
     }
 
@@ -145,6 +156,7 @@ class ExecuteTransferServiceTest {
         Transfer transfer = service.execute(command).transfer();
 
         assertThat(transfer.status()).isEqualTo(TransferStatus.IN_REVIEW);
+        assertThat(transfer.reviewReason()).isEqualTo(ReviewReason.WALLET_DEBIT_UNKNOWN);
         verifyNoInteractions(payments);
     }
 

@@ -18,6 +18,7 @@ import com.ontop.transfers.domain.fee.FeePolicy;
 import com.ontop.transfers.domain.model.IdempotencyKey;
 import com.ontop.transfers.domain.model.Money;
 import com.ontop.transfers.domain.model.Recipient;
+import com.ontop.transfers.domain.model.ReviewReason;
 import com.ontop.transfers.domain.model.Transfer;
 import com.ontop.transfers.domain.model.TransferStatus;
 import org.slf4j.Logger;
@@ -28,8 +29,8 @@ import java.util.Optional;
 
 /**
  * Orchestrates the withdrawal saga: debit the wallet, pay through the provider, refund the wallet if the payment
- * fails. The transfer is persisted before and after every remote call, so a crash always leaves a known last step.
- * See ADR 002.
+ * fails. The transfer is persisted before and after every remote call, so a crash always leaves a known last step
+ * for the recovery job. See ADR 002.
  */
 public final class ExecuteTransferService implements ExecuteTransferUseCase {
 
@@ -40,17 +41,20 @@ public final class ExecuteTransferService implements ExecuteTransferUseCase {
     private final WalletBalancePort walletBalance;
     private final WalletTransactionPort walletTransactions;
     private final PaymentProviderPort payments;
+    private final PaymentOutcomeHandler outcomes;
     private final FeePolicy feePolicy;
     private final Clock clock;
 
     public ExecuteTransferService(RecipientRepository recipients, TransferRepository transfers,
                                   WalletBalancePort walletBalance, WalletTransactionPort walletTransactions,
-                                  PaymentProviderPort payments, FeePolicy feePolicy, Clock clock) {
+                                  PaymentProviderPort payments, PaymentOutcomeHandler outcomes, FeePolicy feePolicy,
+                                  Clock clock) {
         this.recipients = recipients;
         this.transfers = transfers;
         this.walletBalance = walletBalance;
         this.walletTransactions = walletTransactions;
         this.payments = payments;
+        this.outcomes = outcomes;
         this.feePolicy = feePolicy;
         this.clock = clock;
     }
@@ -98,7 +102,8 @@ public final class ExecuteTransferService implements ExecuteTransferUseCase {
             }
             case WalletOperationResult.Unknown unknown -> {
                 log.warn("Transfer {}: wallet debit outcome unknown ({}), sent to review", transfer.id(), unknown.reason());
-                transfer.markOutcomeUnknown("Wallet debit outcome unknown: " + unknown.reason());
+                transfer.markOutcomeUnknown(ReviewReason.WALLET_DEBIT_UNKNOWN,
+                        "Wallet debit outcome unknown: " + unknown.reason());
             }
         }
         return transfers.save(transfer);
@@ -111,30 +116,12 @@ public final class ExecuteTransferService implements ExecuteTransferUseCase {
                 transfer.markPaymentSubmitted(accepted.paymentId());
                 yield transfers.save(transfer);
             }
-            case PaymentResult.Rejected rejected -> {
-                transfer.markPaymentFailed(rejected.reason());
-                yield refund(transfers.save(transfer));
-            }
+            case PaymentResult.Rejected rejected -> outcomes.failAndRefund(transfer, rejected.reason());
             case PaymentResult.Unknown unknown -> {
                 log.warn("Transfer {}: payment outcome unknown ({}), sent to review", transfer.id(), unknown.reason());
-                transfer.markOutcomeUnknown("Payment outcome unknown: " + unknown.reason());
+                transfer.markOutcomeUnknown(ReviewReason.PAYMENT_UNKNOWN, "Payment outcome unknown: " + unknown.reason());
                 yield transfers.save(transfer);
             }
         };
-    }
-
-    /**
-     * Gives back the full amount, fee included. If the refund fails the transfer stays PAYMENT_FAILED for the
-     * recovery job (designed, not coded) to retry.
-     */
-    private Transfer refund(Transfer transfer) {
-        WalletOperationResult result = walletTransactions.topUp(transfer.userId(), transfer.amount());
-        if (result instanceof WalletOperationResult.Succeeded succeeded) {
-            transfer.markRefunded(succeeded.walletTransactionId());
-            return transfers.save(transfer);
-        }
-        log.error("Transfer {}: refund of {} failed ({}), left in PAYMENT_FAILED for recovery", transfer.id(),
-                transfer.amount(), result);
-        return transfer;
     }
 }

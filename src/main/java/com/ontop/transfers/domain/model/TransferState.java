@@ -16,6 +16,7 @@ public record TransferState(
         Money netAmount,
         IdempotencyKey idempotencyKey,
         TransferStatus status,
+        ReviewReason reviewReason,
         String walletDebitId,
         String walletRefundId,
         String providerPaymentId,

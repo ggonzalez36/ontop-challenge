@@ -25,7 +25,7 @@ public enum TransferStatus {
         ALLOWED.put(WALLET_DEBITED, EnumSet.of(PROCESSING, PAYMENT_FAILED, IN_REVIEW));
         ALLOWED.put(PROCESSING, EnumSet.of(COMPLETED, PAYMENT_FAILED));
         ALLOWED.put(IN_REVIEW, EnumSet.of(PROCESSING, PAYMENT_FAILED, REJECTED));
-        ALLOWED.put(PAYMENT_FAILED, EnumSet.of(REFUNDED));
+        ALLOWED.put(PAYMENT_FAILED, EnumSet.of(REFUNDED, IN_REVIEW));
         ALLOWED.put(COMPLETED, EnumSet.noneOf(TransferStatus.class));
         ALLOWED.put(REFUNDED, EnumSet.noneOf(TransferStatus.class));
         ALLOWED.put(REJECTED, EnumSet.noneOf(TransferStatus.class));
@@ -44,5 +44,12 @@ public enum TransferStatus {
      */
     public boolean isInFlight() {
         return this == CREATED || this == WALLET_DEBITED;
+    }
+
+    /**
+     * Non-terminal states the recovery job looks at when a transfer has not moved for a while.
+     */
+    public static Set<TransferStatus> recoverable() {
+        return EnumSet.of(CREATED, WALLET_DEBITED, PROCESSING, PAYMENT_FAILED, IN_REVIEW);
     }
 }

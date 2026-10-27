@@ -3,16 +3,23 @@ package com.ontop.transfers.adapter.in.web;
 import com.ontop.transfers.application.port.in.ExecuteTransferCommand;
 import com.ontop.transfers.application.port.in.ExecuteTransferUseCase;
 import com.ontop.transfers.application.port.in.GetTransferUseCase;
+import com.ontop.transfers.application.port.in.QuoteTransferUseCase;
+import com.ontop.transfers.application.port.in.QuoteTransferUseCase.TransferQuote;
 import com.ontop.transfers.application.port.in.TransferOutcome;
 import com.ontop.transfers.domain.model.Money;
 import com.ontop.transfers.domain.model.Transfer;
 import com.ontop.transfers.domain.model.TransferStatus;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,34 +29,33 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
+import java.math.BigDecimal;
 import java.net.URI;
 import java.util.UUID;
 
-/**
- * Until authentication is in place the user is identified by the {@code X-User-Id} header; with JWT it would come
- * from the token subject and nothing else in this controller would change.
- */
 @RestController
 @RequestMapping("/v1/transfers")
 public class TransferController {
 
-    static final String USER_HEADER = "X-User-Id";
     static final String IDEMPOTENCY_HEADER = "Idempotency-Key";
 
     private final ExecuteTransferUseCase executeTransfer;
     private final GetTransferUseCase getTransfer;
+    private final QuoteTransferUseCase quoteTransfer;
 
-    public TransferController(ExecuteTransferUseCase executeTransfer, GetTransferUseCase getTransfer) {
+    public TransferController(ExecuteTransferUseCase executeTransfer, GetTransferUseCase getTransfer,
+                              QuoteTransferUseCase quoteTransfer) {
         this.executeTransfer = executeTransfer;
         this.getTransfer = getTransfer;
+        this.quoteTransfer = quoteTransfer;
     }
 
     @PostMapping
     public ResponseEntity<TransferResponse> execute(
-            @RequestHeader(USER_HEADER) @Positive long userId,
+            @AuthenticationPrincipal Jwt jwt,
             @RequestHeader(IDEMPOTENCY_HEADER) @NotBlank @Size(max = 64) String idempotencyKey,
             @Valid @RequestBody CreateTransferRequest request) {
-        ExecuteTransferCommand command = new ExecuteTransferCommand(userId, request.recipientId(),
+        ExecuteTransferCommand command = new ExecuteTransferCommand(CurrentUser.id(jwt), request.recipientId(),
                 Money.of(request.amount(), request.currency()), idempotencyKey);
 
         TransferOutcome outcome = executeTransfer.execute(command);
@@ -65,7 +71,24 @@ public class TransferController {
     }
 
     @GetMapping("/{transferId}")
-    public TransferResponse get(@RequestHeader(USER_HEADER) @Positive long userId, @PathVariable UUID transferId) {
-        return TransferResponse.from(getTransfer.get(userId, transferId));
+    public TransferResponse get(@AuthenticationPrincipal Jwt jwt, @PathVariable UUID transferId) {
+        return TransferResponse.from(getTransfer.get(CurrentUser.id(jwt), transferId));
+    }
+
+    @PostMapping("/quotes")
+    public QuoteResponse quote(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody QuoteRequest request) {
+        TransferQuote quote = quoteTransfer.quote(CurrentUser.id(jwt), Money.of(request.amount(), request.currency()));
+        return new QuoteResponse(quote.breakdown().amount().amount(), quote.breakdown().fee().amount(),
+                quote.breakdown().netAmount().amount(), quote.availableBalance().amount(), request.currency(),
+                quote.affordable());
+    }
+
+    public record QuoteRequest(
+            @NotNull @Positive @Digits(integer = 12, fraction = 2) BigDecimal amount,
+            @NotNull @Pattern(regexp = "[A-Z]{3}", message = "must be an ISO 4217 code") String currency) {
+    }
+
+    public record QuoteResponse(BigDecimal amount, BigDecimal fee, BigDecimal netAmount,
+                                BigDecimal availableBalance, String currency, boolean affordable) {
     }
 }

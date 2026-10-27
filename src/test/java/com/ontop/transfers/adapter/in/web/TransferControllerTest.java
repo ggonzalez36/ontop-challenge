@@ -1,5 +1,6 @@
 package com.ontop.transfers.adapter.in.web;
 
+import com.ontop.transfers.adapter.in.web.security.SecurityConfiguration;
 import com.ontop.transfers.application.exception.IdempotencyKeyConflictException;
 import com.ontop.transfers.application.exception.RecipientNotFoundException;
 import com.ontop.transfers.application.exception.TransferInProgressException;
@@ -7,23 +8,30 @@ import com.ontop.transfers.application.exception.WalletUnavailableException;
 import com.ontop.transfers.application.port.in.ExecuteTransferCommand;
 import com.ontop.transfers.application.port.in.ExecuteTransferUseCase;
 import com.ontop.transfers.application.port.in.GetTransferUseCase;
+import com.ontop.transfers.application.port.in.QuoteTransferUseCase;
+import com.ontop.transfers.application.port.in.QuoteTransferUseCase.TransferQuote;
 import com.ontop.transfers.application.port.in.TransferOutcome;
 import com.ontop.transfers.domain.exception.IllegalTransferTransitionException;
 import com.ontop.transfers.domain.exception.InsufficientFundsException;
+import com.ontop.transfers.domain.fee.FeeBreakdown;
+import com.ontop.transfers.domain.model.ReviewReason;
 import com.ontop.transfers.domain.model.Transfer;
 import com.ontop.transfers.domain.model.TransferStatus;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 import java.util.UUID;
 
 import static com.ontop.transfers.TestData.SEEDED_RECIPIENT_ID;
+import static com.ontop.transfers.TestData.TEN_PERCENT;
 import static com.ontop.transfers.TestData.USER_ID;
 import static com.ontop.transfers.TestData.newTransfer;
 import static com.ontop.transfers.TestData.usd;
@@ -32,6 +40,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -39,6 +48,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(TransferController.class)
+@Import(SecurityConfiguration.class)
 class TransferControllerTest {
 
     private static final String BODY = """
@@ -54,9 +64,15 @@ class TransferControllerTest {
     @MockitoBean
     private GetTransferUseCase getTransfer;
 
+    @MockitoBean
+    private QuoteTransferUseCase quoteTransfer;
+
+    static MockHttpServletRequestBuilder asUser(MockHttpServletRequestBuilder request) {
+        return request.with(jwt().jwt(token -> token.subject(String.valueOf(USER_ID))));
+    }
+
     private ResultActions postTransfer(String body) throws Exception {
-        return mvc.perform(post("/v1/transfers")
-                .header("X-User-Id", USER_ID)
+        return mvc.perform(asUser(post("/v1/transfers"))
                 .header("Idempotency-Key", "key-1")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body));
@@ -92,10 +108,32 @@ class TransferControllerTest {
     }
 
     @Test
+    void withoutTokenIs401() throws Exception {
+        mvc.perform(post("/v1/transfers")
+                        .header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(BODY))
+                .andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(executeTransfer);
+    }
+
+    @Test
+    void tokenWhoseSubjectIsNotAUserIdIs403() throws Exception {
+        mvc.perform(post("/v1/transfers").with(jwt().jwt(token -> token.subject("service-account")))
+                        .header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(BODY))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(executeTransfer);
+    }
+
+    @Test
     void returns202WhenOutcomeIsUnknown() throws Exception {
         Transfer transfer = newTransfer("20.00");
         transfer.markWalletDebited("59974");
-        transfer.markOutcomeUnknown("Payment outcome unknown: timeout");
+        transfer.markOutcomeUnknown(ReviewReason.PAYMENT_UNKNOWN, "Payment outcome unknown: timeout");
         when(executeTransfer.execute(any())).thenReturn(TransferOutcome.executed(transfer));
 
         postTransfer(BODY)
@@ -112,8 +150,7 @@ class TransferControllerTest {
 
     @Test
     void missingIdempotencyKeyIs400() throws Exception {
-        mvc.perform(post("/v1/transfers")
-                        .header("X-User-Id", USER_ID)
+        mvc.perform(asUser(post("/v1/transfers"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(BODY))
                 .andExpect(status().isBadRequest());
@@ -203,8 +240,23 @@ class TransferControllerTest {
         Transfer transfer = processingTransfer();
         when(getTransfer.get(USER_ID, transfer.id())).thenReturn(transfer);
 
-        mvc.perform(get("/v1/transfers/{id}", transfer.id()).header("X-User-Id", USER_ID))
+        mvc.perform(asUser(get("/v1/transfers/{id}", transfer.id())))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(transfer.id().toString()));
+    }
+
+    @Test
+    void quoteReturnsFeeNetAmountAndBalance() throws Exception {
+        when(quoteTransfer.quote(USER_ID, usd("20.00")))
+                .thenReturn(new TransferQuote(FeeBreakdown.of(usd("20.00"), TEN_PERCENT), usd("99924.00")));
+
+        mvc.perform(asUser(post("/v1/transfers/quotes"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"amount\": 20.00, \"currency\": \"USD\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.fee").value(2.00))
+                .andExpect(jsonPath("$.netAmount").value(18.00))
+                .andExpect(jsonPath("$.availableBalance").value(99924.00))
+                .andExpect(jsonPath("$.affordable").value(true));
     }
 }

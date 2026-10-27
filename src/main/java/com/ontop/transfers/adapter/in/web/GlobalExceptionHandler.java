@@ -1,6 +1,9 @@
 package com.ontop.transfers.adapter.in.web;
 
+import com.ontop.transfers.application.exception.ConcurrentTransferUpdateException;
 import com.ontop.transfers.application.exception.IdempotencyKeyConflictException;
+import com.ontop.transfers.application.exception.InvalidCursorException;
+import com.ontop.transfers.application.exception.PaymentOutcomeConflictException;
 import com.ontop.transfers.application.exception.RecipientNotFoundException;
 import com.ontop.transfers.application.exception.TransferInProgressException;
 import com.ontop.transfers.application.exception.TransferNotFoundException;
@@ -9,12 +12,14 @@ import com.ontop.transfers.application.exception.WalletUnavailableException;
 import com.ontop.transfers.application.exception.WalletUserNotFoundException;
 import com.ontop.transfers.domain.exception.InsufficientFundsException;
 import com.ontop.transfers.domain.exception.InvalidAmountException;
+import com.ontop.transfers.domain.exception.InvalidRecipientException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
@@ -32,6 +37,32 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(InvalidAmountException.class)
     ProblemDetail invalidAmount(InvalidAmountException e) {
         return problem(HttpStatus.BAD_REQUEST, "invalid-amount", e.getMessage());
+    }
+
+    @ExceptionHandler(InvalidRecipientException.class)
+    ProblemDetail invalidRecipient(InvalidRecipientException e) {
+        return problem(HttpStatus.BAD_REQUEST, "invalid-recipient", e.getMessage());
+    }
+
+    @ExceptionHandler(InvalidCursorException.class)
+    ProblemDetail invalidCursor(InvalidCursorException e) {
+        return problem(HttpStatus.BAD_REQUEST, "invalid-cursor", e.getMessage());
+    }
+
+    @ExceptionHandler(PaymentEventsController.InvalidPaymentEventException.class)
+    ProblemDetail invalidPaymentEvent(PaymentEventsController.InvalidPaymentEventException e) {
+        return problem(HttpStatus.BAD_REQUEST, "invalid-payment-event", e.getMessage());
+    }
+
+    @ExceptionHandler(PaymentEventsController.InvalidSignatureException.class)
+    ProblemDetail invalidSignature(PaymentEventsController.InvalidSignatureException e) {
+        log.warn("Rejected payment event with invalid signature");
+        return problem(HttpStatus.UNAUTHORIZED, "invalid-signature", e.getMessage());
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    ProblemDetail accessDenied(AccessDeniedException e) {
+        return problem(HttpStatus.FORBIDDEN, "forbidden", e.getMessage());
     }
 
     @ExceptionHandler(RecipientNotFoundException.class)
@@ -67,6 +98,17 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(TransferInProgressException.class)
     ProblemDetail transferInProgress(TransferInProgressException e) {
         return problem(HttpStatus.CONFLICT, "transfer-in-progress", e.getMessage());
+    }
+
+    @ExceptionHandler(ConcurrentTransferUpdateException.class)
+    ProblemDetail concurrentUpdate(ConcurrentTransferUpdateException e) {
+        return problem(HttpStatus.CONFLICT, "concurrent-update", e.getMessage());
+    }
+
+    @ExceptionHandler(PaymentOutcomeConflictException.class)
+    ProblemDetail paymentOutcomeConflict(PaymentOutcomeConflictException e) {
+        log.error("Payment outcome conflict, needs manual review: {}", e.getMessage());
+        return problem(HttpStatus.CONFLICT, "payment-outcome-conflict", e.getMessage());
     }
 
     @ExceptionHandler(WalletUnavailableException.class)
