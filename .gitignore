@@ -7,7 +7,7 @@ build/
 .idea/
 *.iml
 .vscode/
-out/
+/out/
 
 # OS
 .DS_Store
