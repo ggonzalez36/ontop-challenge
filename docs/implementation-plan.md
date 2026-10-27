@@ -1,88 +1,82 @@
-# Implementation — execute transfer endpoint
+# Implementation
 
-Only `POST /v1/transfers` (plus `GET /v1/transfers/{id}`) is coded. Everything else is in [architecture-design.md](architecture-design.md).
+The whole design in [architecture-design.md](architecture-design.md) is coded, except the API gateway, the event consumers and the comparison against wallet/provider statements (no such APIs in the mocks).
 
 ## 1. Package layout
 
 ```
 src/main/java/com/ontop/transfers
-├── TransfersApplication.java
-├── domain
-│   ├── model        Transfer, TransferState, TransferStatus, Money, Recipient, BankAccount,
-│   │                RecipientSnapshot, IdempotencyKey
-│   ├── fee          FeePolicy, PercentageFeePolicy
-│   └── exception    DomainException, InvalidAmountException, InsufficientFundsException,
-│                    IllegalTransferTransitionException
+├── domain                          plain Java, no framework
+│   ├── model        Transfer (aggregate + state machine), TransferStatus, ReviewReason, Money, Recipient,
+│   │                BankAccount, RecipientSnapshot, IdempotencyKey, TransferState
+│   ├── event        TransferEvent (sealed): TransferCreated, WalletDebited, PaymentSubmitted, TransferCompleted,
+│   │                PaymentFailed, TransferRefunded, TransferSentToReview, TransferRejected
+│   ├── fee          FeePolicy, PercentageFeePolicy, FeeBreakdown
+│   ├── ledger       LedgerPostings (event → balanced double-entry lines), LedgerEntry
+│   └── exception    InvalidAmount, InvalidRecipient, InsufficientFunds, IllegalTransferTransition
 ├── application
-│   ├── port/in      ExecuteTransferUseCase, ExecuteTransferCommand, TransferOutcome, GetTransferUseCase
-│   ├── port/out     WalletBalancePort, WalletTransactionPort, WalletOperationResult,
-│   │                PaymentProviderPort, PaymentOrder, PaymentResult, TransferRepository, RecipientRepository
-│   ├── exception    RecipientNotFoundException, TransferNotFoundException, IdempotencyKeyConflictException,
-│   │                TransferInProgressException, WalletUnavailableException, WalletUserNotFoundException,
-│   │                WalletOperationRejectedException
-│   └── service      ExecuteTransferService, GetTransferService
+│   ├── port/in      ExecuteTransfer, GetTransfer, QuoteTransfer, ManageRecipients, GetTransactionHistory,
+│   │                ApplyPaymentOutcome, RecoverStuckTransfers, ReconcileTransfers
+│   ├── port/out     WalletBalancePort, WalletTransactionPort, PaymentProviderPort, PaymentStatusPort,
+│   │                TransferRepository, RecipientRepository, TransactionHistoryRepository, ReconciliationRepository
+│   └── service      one class per use case + PaymentOutcomeHandler (shared second half of the saga)
 ├── adapter
-│   ├── in/web       TransferController, CreateTransferRequest, TransferResponse, GlobalExceptionHandler
+│   ├── in/web       controllers, DTOs, GlobalExceptionHandler (RFC 9457), security/ (JWT resource server)
+│   ├── in/scheduler RecoveryScheduler, ReconciliationScheduler (ShedLock)
 │   └── out
-│       ├── wallet       WalletHttpAdapter, WalletProperties
-│       ├── payments     PaymentsHttpAdapter, PaymentsProperties (Ontop source account)
-│       └── persistence  JPA entities, Spring Data repositories, persistence adapters (mapping inside)
-└── config           BeanConfiguration (wires services, ports, FeePolicy, RestClients), FeeProperties
-
-src/main/resources
-├── application.yml, application-postgres.yml
-├── db/migration     V1__create_recipient.sql, V2__create_transfer.sql
-└── db/seed          V100__seed_recipients.sql (demo recipients for user 1000)
+│       ├── wallet       WalletHttpAdapter (RestClient + circuit breaker)
+│       ├── payments     PaymentsHttpAdapter (pay + lookup, circuit breaker)
+│       ├── persistence  JPA entities and adapters, PiiCipher + EncryptedStringConverter, OutboxStore
+│       ├── messaging    OutboxRelay (outbox → Kafka)
+│       └── metrics      TransferMetrics (counter per committed event)
+└── config           BeanConfiguration (wires use cases), SchedulingConfiguration, properties, DemoDataLoader
 ```
 
-Use cases are plain classes created in `BeanConfiguration`, so the application layer has no Spring annotations. Remote results are sealed interfaces (`Succeeded | Rejected | Unknown`) and the service handles them with exhaustive `switch` expressions: adding a new outcome does not compile until every flow handles it.
+Use cases are plain classes created in `BeanConfiguration`, so the application layer has no Spring annotations (ArchUnit enforces it). Remote results are sealed interfaces (`Succeeded | Rejected | Unknown`, `Found | NotFound | Unavailable`) handled with exhaustive `switch` expressions: a new outcome does not compile until every flow handles it.
 
-## 2. Algorithm of `ExecuteTransferService.execute(command)`
+## 2. How a state change is stored
 
 ```
-1. existing = transfers.findByUserIdAndIdempotencyKey(userId, key)
-   if existing: same fingerprint → return it (replay, 200) else throw IdempotencyKeyConflict (409)
-2. recipient = recipients.findByIdAndUserId(recipientId, userId) or throw RecipientNotFound (404)
-3. balance = walletBalance.getBalance(userId)            // 404 / 503 propagate, nothing persisted
-4. transfer = Transfer.create(...)                       // amount, currency, fee, funds (422)
-5. transfers.saveNew(transfer)                           // unique key + in-flight constraint → 409
-6. walletTransactions.withdraw(userId, amount)
-     Succeeded → WALLET_DEBITED
-     Rejected  → REJECTED, throw WalletOperationRejected (422)
-     Unknown   → IN_REVIEW (202)
-7. payments.pay(transferId, recipient snapshot, netAmount)
-     Accepted  → PROCESSING (201)
-     Rejected  → PAYMENT_FAILED → refund
-     Unknown   → IN_REVIEW (202), never refunded automatically
-8. refund: walletTransactions.topUp(userId, amount)
-     Succeeded → REFUNDED (201)
-     otherwise → stays PAYMENT_FAILED for the recovery job (designed)
+service: transfer.markWalletDebited(id)          // domain validates the transition, records WalletDebited
+service: transfers.save(transfer)
+adapter (one DB transaction):
+   update transfer (optimistic lock on version)
+   for each pulled event:
+       insert outbox_event                       // relay → Kafka later
+       insert ledger_entry lines                 // LedgerPostings.forEvent
+       insert wallet_movement                    // history read model (withdrawals, refunds)
+       publish Spring event                      // → TransferMetrics after commit
 ```
 
-Every `save` is its own short DB transaction; no transaction is held open across an HTTP call.
+No DB transaction is held open across an HTTP call.
 
-## 3. Tests (81, all passing)
+## 3. Tests (160: 149 run locally, 11 PostgreSQL tests need Docker and run in CI)
 
 | Layer | Test class | Tool | What it proves |
 |---|---|---|---|
-| Domain | `MoneyTest` | JUnit 5 | 2-decimal normalization, >2 decimals rejected, currency checks |
-| Domain | `PercentageFeePolicyTest` | JUnit 5 params | 20 → 2.00; HALF_EVEN (33.35 → 3.34, 33.25 → 3.32); invalid rates |
-| Domain | `TransferTest` | JUnit 5 | fee deducted from amount, funds/amount/currency rules, valid and illegal transitions |
-| Application | `ExecuteTransferServiceTest` | Mockito | happy path; provider rejection → full refund; refund failure → PAYMENT_FAILED; provider timeout → IN_REVIEW without refund; wallet unknown → no payment; wallet rejection; insufficient funds persists nothing; foreign recipient; wallet down; replay; key conflict |
-| Application | `GetTransferServiceTest` | Mockito | owner check |
-| Web adapter | `TransferControllerTest` | `@WebMvcTest` | 201 + Location, 202, 200 replay, 400 (missing header, invalid body, 3 decimals), 404, 409 ×2, 422, 503 + Retry-After, 500 without internals |
-| Wallet adapter | `WalletHttpAdapterTest` | `MockRestServiceServer` | request shape (negative amount for withdraw), 200 / 400 / 404 / 500 / timeout mapping |
-| Payments adapter | `PaymentsHttpAdapterTest` | `MockRestServiceServer` | full request body with configured Ontop source, Accepted / Rejected / Unknown mapping |
-| Persistence | `TransferPersistenceAdapterTest` | `@DataJpaTest` + Flyway (H2) | round trip, idempotency lookup, one in-flight transfer per user, reused key, optimistic locking |
-| Architecture | `HexagonalArchitectureTest` | ArchUnit | domain and application free of Spring/JPA/adapters; adapters independent |
-| End to end | `ExecuteTransferIntegrationTest` | `@SpringBootTest` + JDK `HttpServer` fake of the mocks | happy path + replay + GET, provider failure → refund, insufficient funds |
+| Domain | `MoneyTest`, `PercentageFeePolicyTest`, `TransferTest`, `RecipientTest`, `LedgerPostingsTest` | JUnit 5 | fee and rounding, transitions, events, recipient validation, balanced postings |
+| Application | `ExecuteTransferServiceTest` | Mockito | every branch of the saga, including rejected vs ambiguous refund |
+| Application | `TransferRecoveryServiceTest` | Mockito | each stuck status, provider found / not found / unavailable, conflicts |
+| Application | `ApplyPaymentOutcomeServiceTest` | Mockito | callback idempotency, refund on failure, contradictions |
+| Application | `QueryServicesTest`, `GetTransferServiceTest` | Mockito | quote, recipients, history cursor, reconciliation report |
+| Web | `TransferControllerTest`, `RecipientAndHistoryControllerTest`, `PaymentEventsControllerTest` | `@WebMvcTest` + Spring Security test | status codes, JWT (401/403), HMAC signature, problem details |
+| HTTP adapters | `WalletHttpAdapterTest`, `PaymentsHttpAdapterTest` | `MockRestServiceServer` | request shapes, outcome mapping, open circuit, lookup |
+| Persistence | `TransferPersistenceAdapterTest` | `@DataJpaTest` + Flyway (H2) | constraints, optimistic locking, encryption at rest, atomic outbox/ledger/history, keyset paging, reconciliation queries |
+| Persistence | `PostgresPersistenceIT` | Testcontainers PostgreSQL 16 | the same tests on PostgreSQL (CI fails if they are skipped) |
+| Messaging | `OutboxRelayKafkaTest` | Embedded Kafka | events reach the topic in order, keyed by transfer, once |
+| Architecture | `HexagonalArchitectureTest` | ArchUnit | dependency rule |
+| End to end | `ExecuteTransferIntegrationTest` | `@SpringBootTest` + fake mocks on loopback | JWT, execute, replay, signed callback → COMPLETED, refund, 202, recipients, quote, history, metrics |
 
-## 4. Deliverables checklist (from the PDF)
+## 4. CI
 
-- [ ] Public Git repository
+`.github/workflows/ci.yml`: build and all tests on JDK 21 (Docker is available on the runner, so the PostgreSQL tests run and the job fails if they were skipped), test reports as an artifact, then a Docker image build.
+
+## 5. Deliverables checklist (from the PDF)
+
+- [x] Public Git repository
 - [x] README with build/run instructions
 - [x] Postman collection ([postman/](../postman/ontop-transfers.postman_collection.json)); example executions against the real mocks still pending (mock host not reachable from here)
 - [x] Unit tests per layer + exception tests
 - [x] Design docs (this folder)
 - [x] Answers to the Tech Lead questions
-- [x] "What I would do with more time" (README)
+- [x] What is left and why (README)

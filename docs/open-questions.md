@@ -11,6 +11,8 @@ The challenge invites questions. Each one lists the assumption taken so work is 
 | 3 | Does the provider accept an external reference and offer a "get payment by reference" endpoint or status webhooks? | Yes in production (needed to resolve `IN_REVIEW`); not available in the mock, so `IN_REVIEW` is final in the coded version. |
 | 4 | Which provider 500s are definitive and which may still execute the payment? | The mock's "500 with destination name" = definitive failure → refund; "500 timeout" = unknown → `IN_REVIEW`. |
 | 5 | What does provider `status: Processing` evolve into, and how long until a payment is final? | `Processing → Completed | Failed` within minutes to 1–2 days (ACH). |
+| 5b | Does the provider send status callbacks, and how are they signed? | Yes; `POST /internal/v1/payment-events` with `{reference, paymentId, status, reason}` and `X-Signature: sha256=<HMAC of the body>`. Only the controller changes if the format differs. |
+| 5c | Do the wallet or the provider expose statements (transactions by date) for reconciliation? | Not in the mocks; reconciliation checks our own ledger and stale transfers until they do. |
 
 ## Business rules
 

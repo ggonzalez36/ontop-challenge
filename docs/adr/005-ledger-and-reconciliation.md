@@ -1,6 +1,6 @@
 # ADR 005 — Internal double-entry ledger and three-way reconciliation
 
-**Status:** Proposed (designed, not coded)
+**Status:** Accepted (internal reconciliation coded; comparison with wallet and provider statements pending APIs)
 
 ## Context
 

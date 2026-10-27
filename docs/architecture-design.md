@@ -18,14 +18,14 @@ A user has a **wallet**: a virtual balance backed by Ontop's single bank account
 
 | Screen | Capability | Endpoint | Status |
 |---|---|---|---|
-| "We need some information about your recipient's bank account" | Save a recipient bank account | `POST /v1/recipients` | ⬜ |
-| (pick from saved accounts) | List / delete saved accounts | `GET /v1/recipients`, `DELETE /v1/recipients/{id}` | ⬜ |
-| "How much money do you want to send?" — available funds | Read wallet balance | `GET /v1/wallet/balance` | ⬜ |
-| "How much money do you want to send?" — fee / recipient gets | Quote a transfer | `POST /v1/transfers/quotes` | ⬜ |
+| "We need some information about your recipient's bank account" | Save a recipient bank account | `POST /v1/recipients` | ✅ |
+| (pick from saved accounts) | List / delete saved accounts | `GET /v1/recipients`, `DELETE /v1/recipients/{id}` | ✅ |
+| "How much money do you want to send?" — available funds, fee, recipient gets | Quote a transfer (includes the wallet balance) | `POST /v1/transfers/quotes` | ✅ |
 | Continue | **Execute the transfer** | `POST /v1/transfers` | ✅ |
-| Transfer detail | Read one transfer | `GET /v1/transfers/{id}` | 🟡 |
-| "Recent transactions" | Transaction history | `GET /v1/transactions` | ⬜ |
-| (async) | Provider status callback / polling | `POST /internal/v1/payment-events` or scheduler | ⬜ |
+| Transfer detail | Read one transfer | `GET /v1/transfers/{id}` | ✅ |
+| "Recent transactions" | Transaction history | `GET /v1/transactions` | ✅ |
+| (async) | Provider status callback and recovery polling | `POST /internal/v1/payment-events`, recovery job | ✅ (lookup endpoint 🟡, see §12) |
+| (back office) | Reconciliation | daily job + gauges | ✅ internal checks, ⬜ wallet/provider statements |
 
 ## 3. System context (C4 level 1)
 
@@ -82,7 +82,7 @@ graph TB
     Broker --> History["History / analytics consumers"]
 ```
 
-**Scope for the coded part:** REST adapter, hexagon, PostgreSQL/H2 with Flyway, HTTP adapters for the three mocks. Kafka, outbox relay, gateway and jobs are designed only.
+**Coded:** REST adapters with JWT, the hexagon, PostgreSQL/H2 with Flyway, HTTP adapters for the three mocks with circuit breakers, recovery and reconciliation jobs with ShedLock, the outbox relay to Kafka (switched on in Docker Compose) and Prometheus metrics. **Not coded:** the API gateway (rate limiting) and the notifications/analytics consumers.
 
 ## 5. Hexagonal view (ports and adapters)
 
@@ -240,6 +240,7 @@ stateDiagram-v2
     IN_REVIEW --> PAYMENT_FAILED : reconciliation finds no payment
     IN_REVIEW --> REJECTED : reconciliation finds no wallet debit
     PAYMENT_FAILED --> REFUNDED : wallet top-up OK
+    PAYMENT_FAILED --> IN_REVIEW : top-up outcome unknown
     COMPLETED --> [*]
     REFUNDED --> [*]
     REJECTED --> [*]
@@ -257,6 +258,17 @@ stateDiagram-v2
 | `REJECTED` | Nothing moved | Failed |
 
 The key rule: **a timeout is not a failure.** If the provider times out, the payment may have been executed; refunding immediately could pay the user twice. The transfer goes to `IN_REVIEW` and the reconciliation job decides. See [ADR 002](adr/002-transfer-saga-debit-first.md).
+
+`IN_REVIEW` carries a `reviewReason`, and only one of them can be resolved by a machine:
+
+| Reason | What is unknown | Recovery job |
+|---|---|---|
+| `PAYMENT_UNKNOWN` | whether the provider executed the payment | asks the provider by reference: found → follow its status; not found after the grace period → refund |
+| `WALLET_DEBIT_UNKNOWN` | whether the wallet was debited | waits for a person (the wallet has no lookup API) |
+| `REFUND_UNKNOWN` | whether the refund was applied | waits for a person (retrying could refund twice) |
+| `INTERRUPTED` | the process stopped before the debit was confirmed | waits for a person |
+
+The recovery job runs every minute on one instance (ShedLock) and looks at transfers that have not changed for 15 minutes: `CREATED` → `IN_REVIEW(INTERRUPTED)`; `WALLET_DEBITED` and `PROCESSING` → ask the provider; `PAYMENT_FAILED` → retry the refund. It never changes money when it is not sure.
 
 ## 8. Sequences
 
@@ -311,10 +323,14 @@ sequenceDiagram
     alt refund OK
         WT-->>S: refundTxId
         S->>R: save(REFUNDED)
-    else refund fails
-        WT-->>S: error
+    else refund rejected (4xx, circuit open)
+        WT-->>S: rejected
         S->>R: keep PAYMENT_FAILED
-        Note over S,R: RecoveryJob retries the refund<br/>until REFUNDED or alerts on-call
+        Note over S,R: RecoveryJob retries the refund
+    else refund outcome unknown (5xx, timeout)
+        WT-->>S: unknown
+        S->>R: save(IN_REVIEW, REFUND_UNKNOWN)
+        Note over S,R: never retried automatically:<br/>it could refund twice
     end
 ```
 
@@ -412,34 +428,36 @@ erDiagram
         timestamptz created_at
         timestamptz updated_at
     }
-    TRANSFER_STATUS_HISTORY {
-        bigserial id PK
+    WALLET_MOVEMENT {
+        bigint id PK
+        bigint user_id
         uuid transfer_id FK
-        varchar from_status
-        varchar to_status
-        varchar reason
-        timestamptz at
+        varchar type
+        numeric amount
+        varchar currency
+        timestamptz occurred_at
     }
     LEDGER_ENTRY {
-        bigserial id PK
+        bigint id PK
         uuid transfer_id FK
         varchar account
         numeric debit
         numeric credit
-        char currency
-        timestamptz at
-    }
-    OUTBOX {
-        uuid id PK
-        varchar aggregate_id
-        varchar event_type
-        jsonb payload
+        varchar currency
         timestamptz created_at
+    }
+    OUTBOX_EVENT {
+        uuid id PK
+        uuid aggregate_id
+        varchar event_type
+        varchar payload
+        timestamptz occurred_at
         timestamptz published_at
     }
     RECIPIENT ||--o{ TRANSFER : "receives"
-    TRANSFER ||--o{ TRANSFER_STATUS_HISTORY : "audit trail"
+    TRANSFER ||--o{ WALLET_MOVEMENT : "history lines"
     TRANSFER ||--o{ LEDGER_ENTRY : "posts"
+    TRANSFER ||--o{ OUTBOX_EVENT : "events (audit trail)"
 ```
 
 - `UNIQUE (user_id, idempotency_key)` on `transfer`.
@@ -449,29 +467,28 @@ erDiagram
 - `national_id` and `account_number` encrypted at the application layer (AES-GCM, key from KMS / Vault); only `account_last4` is returned by the API.
 - `ledger_entry` is append-only; see [ADR 005](adr/005-ledger-and-reconciliation.md).
 
-**Coded scope:** `recipient` (seeded with Flyway) and `transfer`. History, ledger and outbox tables are designed.
+**Coded:** every table above, plus `shedlock`. The status history is not a separate table: the outbox keeps every event of every transfer in order, which serves as the audit trail. Demo recipients are loaded by `DemoDataLoader` through the repository, because their numbers must be encrypted.
 
 ## 10. API design
 
-Authentication is by JWT at the gateway; the user id comes from the token (`sub`). In the coded version, which has no auth, the user id travels in the `X-User-Id` header so the controller does not change when auth is added.
+Every `/v1` endpoint requires a JWT (OAuth2 resource server); the user id is the token subject (`sub`) and is never read from the body or a header. Production validates tokens from the identity provider (`JWT_ISSUER_URI`); locally and in tests they are HS256 with a development secret. The provider callback uses an HMAC signature instead of a JWT.
 
 | Method | Path | Purpose | Success | Status |
 |---|---|---|---|---|
-| POST | `/v1/recipients` | Save a bank account | 201 | ⬜ |
-| GET | `/v1/recipients` | List saved accounts (masked) | 200 | ⬜ |
-| DELETE | `/v1/recipients/{id}` | Soft delete | 204 | ⬜ |
-| GET | `/v1/wallet/balance` | Available funds | 200 | ⬜ |
-| POST | `/v1/transfers/quotes` | Fee and net amount for an amount | 200 | ⬜ |
+| POST | `/v1/recipients` | Save a bank account | 201 | ✅ |
+| GET | `/v1/recipients` | List saved accounts (masked) | 200 | ✅ |
+| DELETE | `/v1/recipients/{id}` | Soft delete | 204 | ✅ |
+| POST | `/v1/transfers/quotes` | Fee, net amount and available funds | 200 | ✅ |
 | **POST** | **`/v1/transfers`** | **Execute a transfer** | **201 / 202 / 200 replay** | ✅ |
-| GET | `/v1/transfers/{id}` | Transfer detail | 200 | 🟡 |
-| GET | `/v1/transactions?cursor=&limit=&type=` | History, newest first, cursor pagination | 200 | ⬜ |
-| POST | `/internal/v1/payment-events` | Provider callback (signed) | 204 | ⬜ |
+| GET | `/v1/transfers/{id}` | Transfer detail | 200 | ✅ |
+| GET | `/v1/transactions?cursor=&limit=` | History, newest first, keyset (cursor) pagination | 200 | ✅ |
+| POST | `/internal/v1/payment-events` | Provider callback, `X-Signature: sha256=<hmac>` | 204 | ✅ |
 
 ### Execute transfer contract
 
 ```http
 POST /v1/transfers
-X-User-Id: 1000
+Authorization: Bearer eyJhbGciOiJIUzI1NiIs...   (sub = 1000)
 Idempotency-Key: 7f9c2a0e-1c55-4f7b-9a63-3f0d6b2d1e10
 Content-Type: application/json
 
@@ -521,6 +538,13 @@ Domain and application throw typed exceptions; a single `@RestControllerAdvice` 
 | `TransferInProgressException` | repository (unique index) | 409 | `transfer-in-progress` |
 | `WalletUserNotFoundException` | wallet adapter (mock 404) | 404 | `wallet-not-found` |
 | `WalletUnavailableException` | wallet adapter (mock 500, timeout, CB open) | 503 + `Retry-After` | `wallet-unavailable` |
+| `InvalidRecipientException` | domain | 400 | `invalid-recipient` |
+| `InvalidCursorException` | application | 400 | `invalid-cursor` |
+| missing / invalid JWT | Spring Security | 401 | (empty body, `WWW-Authenticate`) |
+| JWT subject is not a user id | web adapter | 403 | `forbidden` |
+| bad callback signature | web adapter | 401 | `invalid-signature` |
+| `ConcurrentTransferUpdateException` | persistence adapter (optimistic lock) | 409 | `concurrent-update` |
+| `PaymentOutcomeConflictException` | application (provider contradicts our state) | 409 + error log | `payment-outcome-conflict` |
 | `IllegalTransferTransitionException` | domain | 500 (bug, alert) | `internal-error` |
 | any other | — | 500, no stack trace in body | `internal-error` |
 
@@ -537,18 +561,20 @@ Provider errors are **not** HTTP errors for the client: they change the transfer
 | `PaymentProviderPort` | `POST /api/v1/payments` | `{ source: { type: COMPANY, sourceInformation: { name }, account: { accountNumber, currency, routingNumber } }, destination: { name, account: {...} }, amount }` | 200 `{ requestInfo: { status }, paymentInfo: { id, amount } }`, 400, 500 (failure), 500 (timeout) |
 
 - Ontop's source account (name, account number, routing number, currency) is **configuration** (`ontop.payments.source.*`), never request input.
-- Each adapter has its own timeouts (connect 2 s, read 5 s for wallet, 10 s for provider). Designed, not coded: a Resilience4j circuit breaker per adapter and retries **only on idempotent calls** (balance GET). The wallet withdrawal and the payment POST are never retried blindly, because the mocks give no idempotency guarantee.
+- Each adapter has its own timeouts (connect 2 s, read 5 s for wallet, 10 s for provider) and a Resilience4j circuit breaker (`wallet`, `payments`; 4xx do not count as failures). An open circuit means the call was **not sent**, so it is a definite answer: balance → 503, withdrawal → rejected, payment → rejected and refunded. Nothing is retried blindly: the wallet withdrawal and the payment POST have no idempotency guarantee in the mocks.
+- `PaymentStatusPort.lookup(transferId)` (🟡): assumed `GET /api/v1/payments?reference={transferId}`. The mocks do not have it, so it is off by default (`PAYMENTS_LOOKUP_ENABLED=false`) and transfers with an unknown payment wait in `IN_REVIEW` for the callback or for a person.
 
 ## 13. Cross-cutting concerns
 
 | Concern | Decision |
 |---|---|
-| Observability | Micrometer metrics per status transition and per adapter (latency, errors, CB state); `traceId` propagated with Micrometer Tracing and logged with `transferId`, `userId`. |
-| Alerts | Transfers in `IN_REVIEW` or `PAYMENT_FAILED` older than 15 min; reconciliation mismatch > 0; circuit breaker open. |
-| Security | JWT at the gateway, ownership check on every recipient/transfer, PII encrypted at rest and masked in logs, provider callbacks verified by HMAC signature, secrets from env / Vault. |
-| Limits | Per-user rate limit at the gateway; configurable min/max amount per transfer and daily limit (AML). |
-| Configuration | Fee rate, Ontop account, mock URLs, timeouts in `application.yml` with `@ConfigurationProperties` validation at startup. |
+| Observability ✅ | `/actuator/prometheus`: `ontop_transfers_events_total{type}` (one per committed state change), `http_client_requests` per adapter, `resilience4j_circuitbreaker_*`, `ontop_reconciliation_unbalanced`, `ontop_transfers_stale{status}`. ⬜ Tracing with Micrometer Tracing. |
+| Alerts ⬜ | On the metrics above: stale `IN_REVIEW` / `PAYMENT_FAILED` > 0, unbalanced > 0, circuit breaker open, refund rate above baseline. |
+| Security ✅ | JWT resource server, ownership check on every recipient/transfer, national id and account numbers encrypted with AES-256-GCM (JPA converter) and masked in responses, HMAC-signed provider callbacks, all secrets from environment variables (dev defaults only for local use). ⬜ KMS/Vault and key rotation. |
+| Resilience ✅ | Timeouts and a circuit breaker per remote service, recovery job, idempotency, optimistic locking. |
+| Limits ⬜ | Per-user rate limit at the gateway; daily amount limits (AML). |
+| Configuration ✅ | Fee rate, Ontop account, mock URLs, timeouts, job intervals in `application.yml`, validated at startup with `@ConfigurationProperties`. |
 
 ## 14. What is coded vs. designed
 
-See [implementation-plan.md](implementation-plan.md). In short: the `POST /v1/transfers` vertical slice (controller → use case → domain → wallet/payments adapters → JPA) with compensation on provider failure and `IN_REVIEW` on timeout, plus tests per layer. Recipients CRUD, quotes, history, outbox, callbacks and reconciliation are designed here and listed as next steps.
+See [implementation-plan.md](implementation-plan.md). Everything in this document is coded and tested, except: the API gateway, the event consumers (notifications, analytics), comparing against wallet and provider statements (no such APIs in the mocks), and the provider lookup contract (assumed, disabled by default).

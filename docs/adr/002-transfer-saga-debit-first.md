@@ -10,7 +10,7 @@ A withdrawal changes two systems with no shared transaction: the wallet service 
 
 1. **Order of steps:** check balance → persist `CREATED` → **withdraw from wallet** → persist `WALLET_DEBITED` → **pay via provider** → persist `PROCESSING`. Completion (`COMPLETED`) arrives later by callback or polling.
 2. **Persist before and after every external call.** The transfer row is the saga log; after a crash, the recovery job knows exactly which step was last confirmed.
-3. **Compensation:** if the provider returns a definitive failure, mark `PAYMENT_FAILED` and top up the wallet with the full amount (fee included) → `REFUNDED`. A failed refund stays `PAYMENT_FAILED` and is retried by the recovery job.
+3. **Compensation:** if the provider returns a definitive failure, mark `PAYMENT_FAILED` and top up the wallet with the full amount (fee included) → `REFUNDED`. A rejected refund stays `PAYMENT_FAILED` and is retried by the recovery job; a refund with an unknown outcome goes to `IN_REVIEW` (`REFUND_UNKNOWN`), because retrying it could refund twice.
 4. **Unknown outcome is its own state.** A timeout or connection reset on the payment call goes to `IN_REVIEW`, never to refund. Refunding a payment that actually went through pays the user twice and is unrecoverable without contacting the user.
 5. **Orchestration, not choreography:** a single service drives the steps. There are only two remote steps; events between services would add a broker to the critical path without adding clarity.
 
@@ -31,6 +31,6 @@ Fully asynchronous (202 + worker + outbox) is the scale-up path if provider late
 
 ## Consequences
 
-- A recovery job is mandatory in production: it picks transfers stuck in `CREATED`, `WALLET_DEBITED`, `PAYMENT_FAILED` or `IN_REVIEW` older than a threshold and drives them forward (with `@Version` optimistic locking and ShedLock so only one instance runs it).
+- A recovery job (coded, see `TransferRecoveryService`) is mandatory: it picks transfers stuck in `CREATED`, `WALLET_DEBITED`, `PAYMENT_FAILED` or `IN_REVIEW` older than a threshold and drives them forward (with `@Version` optimistic locking and ShedLock so only one instance runs it).
 - The provider should receive the transfer id as an external reference, so reconciliation can look the payment up. To confirm with the provider contract.
-- The coded version implements steps 1–4 inline; the recovery job and callbacks are designed only.
+- Steps 1–4 run in the request; the recovery job and the provider callback share `PaymentOutcomeHandler` with it, so the three paths always treat the same provider answer the same way.
